@@ -77,7 +77,25 @@ fn decode_pqr(op: u8, dst: u8, src: u8, imm: i32) -> String {
     }
 }
 
-pub fn decode(bytes: &[u8], _pc: usize) -> DecodedIns {
+// Format a memory reference, omitting zero offset and showing negative offsets cleanly.
+fn mem_ref(base: u8, offset: i16) -> String {
+    match offset.cmp(&0) {
+        std::cmp::Ordering::Equal   => format!("[r{}]", base),
+        std::cmp::Ordering::Greater => format!("[r{}+0x{:x}]", base, offset),
+        std::cmp::Ordering::Less    => format!("[r{}-0x{:x}]", base, -(offset as i32)),
+    }
+}
+
+// Compute absolute jump/call target PC from current pc, insn size, and offset/imm.
+fn jmp_target(pc: usize, offset: i16) -> u64 {
+    (pc as i64 + 8 + offset as i64 * 8) as u64
+}
+
+fn call_target(pc: usize, imm: i32) -> u64 {
+    (pc as i64 + 8 + imm as i64 * 8) as u64
+}
+
+pub fn decode(bytes: &[u8], pc: usize) -> DecodedIns {
     let insn = Insn {
         op: bytes[0],
         dst: bytes[1] & 0x0f,
@@ -91,34 +109,34 @@ pub fn decode(bytes: &[u8], _pc: usize) -> DecodedIns {
     let mnemonic = match insn.op & 0x07 {
         // ALU32 (class 0x04) — also v2 new-style loads share this class
         0x04 => match insn.op {
-            0x24 => format!("ld1b r{}, [r{}+0x{:x}]", insn.dst, insn.src, insn.offset),
-            0x34 => format!("ld2b r{}, [r{}+0x{:x}]", insn.dst, insn.src, insn.offset),
-            0x84 => format!("ld4b r{}, [r{}+0x{:x}]", insn.dst, insn.src, insn.offset),
-            0x94 => format!("ld8b r{}, [r{}+0x{:x}]", insn.dst, insn.src, insn.offset),
+            0x24 => format!("ld1b r{}, {}", insn.dst, mem_ref(insn.src, insn.offset)),
+            0x34 => format!("ld2b r{}, {}", insn.dst, mem_ref(insn.src, insn.offset)),
+            0x84 => format!("ld4b r{}, {}", insn.dst, mem_ref(insn.src, insn.offset)),
+            0x94 => format!("ld8b r{}, {}", insn.dst, mem_ref(insn.src, insn.offset)),
             _    => decode_alu(insn.op, "32", insn.dst, insn.src, insn.imm),
         },
         // ALU64 (class 0x07) — also v2 new-style stores share this class
         0x07 => match insn.op {
-            0x27 => format!("st1b [r{}+0x{:x}], {}", insn.dst, insn.offset, insn.imm),
-            0x37 => format!("st2b [r{}+0x{:x}], {}", insn.dst, insn.offset, insn.imm),
-            0x87 => format!("st4b [r{}+0x{:x}], {}", insn.dst, insn.offset, insn.imm),
-            0x97 => format!("st8b [r{}+0x{:x}], {}", insn.dst, insn.offset, insn.imm),
-            0x2f => format!("st1b [r{}+0x{:x}], r{}", insn.dst, insn.offset, insn.src),
-            0x3f => format!("st2b [r{}+0x{:x}], r{}", insn.dst, insn.offset, insn.src),
-            0x8f => format!("st4b [r{}+0x{:x}], r{}", insn.dst, insn.offset, insn.src),
-            0x9f => format!("st8b [r{}+0x{:x}], r{}", insn.dst, insn.offset, insn.src),
+            0x27 => format!("st1b {}, {}", mem_ref(insn.dst, insn.offset), insn.imm),
+            0x37 => format!("st2b {}, {}", mem_ref(insn.dst, insn.offset), insn.imm),
+            0x87 => format!("st4b {}, {}", mem_ref(insn.dst, insn.offset), insn.imm),
+            0x97 => format!("st8b {}, {}", mem_ref(insn.dst, insn.offset), insn.imm),
+            0x2f => format!("st1b {}, r{}", mem_ref(insn.dst, insn.offset), insn.src),
+            0x3f => format!("st2b {}, r{}", mem_ref(insn.dst, insn.offset), insn.src),
+            0x8f => format!("st4b {}, r{}", mem_ref(insn.dst, insn.offset), insn.src),
+            0x9f => format!("st8b {}, r{}", mem_ref(insn.dst, insn.offset), insn.src),
             _    => decode_alu(insn.op, "64", insn.dst, insn.src, insn.imm),
         },
         // PQR (class 0x06)
         0x06 => decode_pqr(insn.op, insn.dst, insn.src, insn.imm),
         // JMP (class 0x05)
         0x05 => match insn.op {
-            0x05 => format!("ja +{}", insn.offset),
+            0x05 => format!("ja 0x{:04x}", jmp_target(pc, insn.offset)),
             0x85 => {
                 if insn.src == 0 {
                     format!("syscall 0x{:08x}", insn.imm)
                 } else {
-                    format!("call +{}", insn.imm)
+                    format!("call 0x{:04x}", call_target(pc, insn.imm))
                 }
             }
             0x8d => format!("callx r{}", insn.src),
@@ -126,34 +144,35 @@ pub fn decode(bytes: &[u8], _pc: usize) -> DecodedIns {
             0x9d => format!("return"),
             _    => {
                 let name = jmp_name(insn.op);
+                let target = jmp_target(pc, insn.offset);
                 if insn.op & 0x08 == 0 {
-                    format!("{} r{}, 0x{:x}, +{}", name, insn.dst, insn.imm, insn.offset)
+                    format!("{} r{}, 0x{:x}, 0x{:04x}", name, insn.dst, insn.imm, target)
                 } else {
-                    format!("{} r{}, r{}, +{}", name, insn.dst, insn.src, insn.offset)
+                    format!("{} r{}, r{}, 0x{:04x}", name, insn.dst, insn.src, target)
                 }
             }
         },
         // legacy loads (class 0x01)
         0x01 => match insn.op {
-            0x61 => format!("ldxw r{}, [r{}+0x{:x}]", insn.dst, insn.src, insn.offset),
-            0x69 => format!("ldxh r{}, [r{}+0x{:x}]", insn.dst, insn.src, insn.offset),
-            0x71 => format!("ldxb r{}, [r{}+0x{:x}]", insn.dst, insn.src, insn.offset),
-            0x79 => format!("ldxdw r{}, [r{}+0x{:x}]", insn.dst, insn.src, insn.offset),
+            0x61 => format!("ldxw r{}, {}", insn.dst, mem_ref(insn.src, insn.offset)),
+            0x69 => format!("ldxh r{}, {}", insn.dst, mem_ref(insn.src, insn.offset)),
+            0x71 => format!("ldxb r{}, {}", insn.dst, mem_ref(insn.src, insn.offset)),
+            0x79 => format!("ldxdw r{}, {}", insn.dst, mem_ref(insn.src, insn.offset)),
             _    => format!("unknown 0x{:02x}", insn.op),
         },
         // legacy stores imm (class 0x02) and reg (class 0x03)
         0x02 => match insn.op {
-            0x62 => format!("stw [r{}+0x{:x}], {}", insn.dst, insn.offset, insn.imm),
-            0x6a => format!("sth [r{}+0x{:x}], {}", insn.dst, insn.offset, insn.imm),
-            0x72 => format!("stb [r{}+0x{:x}], {}", insn.dst, insn.offset, insn.imm),
-            0x7a => format!("stdw [r{}+0x{:x}], {}", insn.dst, insn.offset, insn.imm),
+            0x62 => format!("stw {}, {}", mem_ref(insn.dst, insn.offset), insn.imm),
+            0x6a => format!("sth {}, {}", mem_ref(insn.dst, insn.offset), insn.imm),
+            0x72 => format!("stb {}, {}", mem_ref(insn.dst, insn.offset), insn.imm),
+            0x7a => format!("stdw {}, {}", mem_ref(insn.dst, insn.offset), insn.imm),
             _    => format!("unknown 0x{:02x}", insn.op),
         },
         0x03 => match insn.op {
-            0x63 => format!("stxw [r{}+0x{:x}], r{}", insn.dst, insn.offset, insn.src),
-            0x6b => format!("stxh [r{}+0x{:x}], r{}", insn.dst, insn.offset, insn.src),
-            0x73 => format!("stxb [r{}+0x{:x}], r{}", insn.dst, insn.offset, insn.src),
-            0x7b => format!("stxdw [r{}+0x{:x}], r{}", insn.dst, insn.offset, insn.src),
+            0x63 => format!("stxw {}, r{}", mem_ref(insn.dst, insn.offset), insn.src),
+            0x6b => format!("stxh {}, r{}", mem_ref(insn.dst, insn.offset), insn.src),
+            0x73 => format!("stxb {}, r{}", mem_ref(insn.dst, insn.offset), insn.src),
+            0x7b => format!("stxdw {}, r{}", mem_ref(insn.dst, insn.offset), insn.src),
             _    => format!("unknown 0x{:02x}", insn.op),
         },
         // lddw (class 0x00, op 0x18)
@@ -186,6 +205,18 @@ mod tests {
     }
 
     #[test]
+    fn test_ldxw_zero_offset() {
+        let bytes = [0x61, 0x21, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        assert_eq!(decode(&bytes, 0).mnemonic, "ldxw r1, [r2]");
+    }
+
+    #[test]
+    fn test_ldxdw_negative_offset() {
+        let bytes = [0x79, 0xa6, 0xf8, 0xff, 0x00, 0x00, 0x00, 0x00];
+        assert_eq!(decode(&bytes, 0).mnemonic, "ldxdw r6, [r10-0x8]");
+    }
+
+    #[test]
     fn test_add64_reg() {
         let bytes = [0x0f, 0x21, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
         assert_eq!(decode(&bytes, 0).mnemonic, "add64 r1, r2");
@@ -199,14 +230,32 @@ mod tests {
 
     #[test]
     fn test_jeq_imm() {
+        // jeq r1, 0x0, target=0x20 (pc=0, offset=3 → 0 + 8 + 3*8 = 0x20)
         let bytes = [0x15, 0x01, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00];
-        assert_eq!(decode(&bytes, 0).mnemonic, "jeq r1, 0x0, +3");
+        assert_eq!(decode(&bytes, 0).mnemonic, "jeq r1, 0x0, 0x0020");
     }
 
     #[test]
     fn test_jeq_reg() {
         let bytes = [0x1d, 0x21, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00];
-        assert_eq!(decode(&bytes, 0).mnemonic, "jeq r1, r2, +3");
+        assert_eq!(decode(&bytes, 0).mnemonic, "jeq r1, r2, 0x0020");
+    }
+
+    #[test]
+    fn test_ja_target() {
+        // ja offset=-12 from pc=0x80 → 0x80 + 8 + (-12)*8 = 0x88 - 0x60 = 0x28
+        let bytes = [0x05, 0x00, 0xf4, 0xff, 0x00, 0x00, 0x00, 0x00];
+        assert_eq!(decode(&bytes, 0x80).mnemonic, "ja 0x0028");
+    }
+
+    #[test]
+    fn test_call_target() {
+        // call imm=263 from pc=0x1a8 → 0x1a8 + 8 + 263*8 = 0x9e8
+        let mut bytes = [0u8; 8];
+        bytes[0] = 0x85;
+        bytes[1] = 0x10; // src=1 (local call)
+        bytes[4..8].copy_from_slice(&263u32.to_le_bytes());
+        assert_eq!(decode(&bytes, 0x1a8).mnemonic, "call 0x09e8");
     }
 
     #[test]
@@ -242,8 +291,8 @@ mod tests {
     }
 
     #[test]
-    fn test_stxdw() {
+    fn test_stxdw_negative_offset() {
         let bytes = [0x7b, 0x1a, 0xf8, 0xff, 0x00, 0x00, 0x00, 0x00];
-        assert_eq!(decode(&bytes, 0).mnemonic, "stxdw [r10+0xfff8], r1");
+        assert_eq!(decode(&bytes, 0).mnemonic, "stxdw [r10-0x8], r1");
     }
 }
