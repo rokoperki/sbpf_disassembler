@@ -39,6 +39,7 @@ static SYSCALLS: phf::Map<u32, &'static str> = phf_map! {
     0xae0c318bu32 => "sol_alt_bn128_group_op",
     0x780e4c15u32 => "sol_big_mod_exp",
     0xc4947c21u32 => "sol_poseidon",
+    0xedef5aeeu32 => "sol_remaining_compute_units",
     0x334fd5edu32 => "sol_alt_bn128_compression",
     0x13c1b505u32 => "sol_get_sysvar",
     0x5be92f4au32 => "sol_get_epoch_stake",
